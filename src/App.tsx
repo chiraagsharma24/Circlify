@@ -1,6 +1,6 @@
 import React from 'react';
 import CircleGame from './components/CircleGame';
-import { Analytics } from "@vercel/analytics/next";
+import { Analytics } from "@vercel/analytics/react";
 
 function App() {
   return (
