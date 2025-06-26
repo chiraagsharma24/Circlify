@@ -7,6 +7,9 @@ function App() {
     <>
       <CircleGame />
       <Analytics />
+      <footer className="w-full text-center py-4 text-gray-400 text-sm">
+        made with love by <a href="https://x.com/LordGoldyy" target="_blank" rel="noopener noreferrer" className="text-cyan-400 hover:underline">Goldyy</a>
+      </footer>
     </>
   );
 }
