@@ -1,15 +1,10 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { RefreshCw, Twitter, Trophy, Star, Sparkles } from 'lucide-react';
+import { RefreshCw, Twitter, Trophy, Star, Sparkles, Wifi, WifiOff } from 'lucide-react';
+import { supabase, LeaderboardEntry } from '../lib/supabase';
 
 interface Point {
   x: number;
   y: number;
-}
-
-interface LeaderboardEntry {
-  username: string;
-  score: number;
-  date: string;
 }
 
 const CircleGame: React.FC = () => {
@@ -26,22 +21,77 @@ const CircleGame: React.FC = () => {
   const [personalBest, setPersonalBest] = useState<number | null>(null);
   const [showCelebration, setShowCelebration] = useState(false);
   const [centerPoint, setCenterPoint] = useState<Point>({ x: 0, y: 0 });
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [isLoading, setIsLoading] = useState(false);
 
   const timeoutRef = useRef<NodeJS.Timeout>();
   const timerRef = useRef<NodeJS.Timeout>();
 
-  // Load leaderboard and personal best from localStorage
-  useEffect(() => {
-    const savedLeaderboard = localStorage.getItem('circleLeaderboard');
-    if (savedLeaderboard) {
-      setLeaderboard(JSON.parse(savedLeaderboard));
+  // Generate a simple device ID for duplicate prevention
+  const getDeviceId = () => {
+    let deviceId = localStorage.getItem('circle_device_id');
+    if (!deviceId) {
+      deviceId = 'device_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
+      localStorage.setItem('circle_device_id', deviceId);
     }
+    return deviceId;
+  };
+
+  // Monitor online status
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Load global leaderboard and personal best
+  useEffect(() => {
+    loadLeaderboard();
     
     const savedPersonalBest = localStorage.getItem('circlePersonalBest');
     if (savedPersonalBest) {
       setPersonalBest(parseFloat(savedPersonalBest));
     }
   }, []);
+
+  // Load leaderboard from Supabase
+  const loadLeaderboard = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('leaderboard')
+        .select('*')
+        .order('score', { ascending: false })
+        .limit(10);
+
+      if (error) {
+        console.error('Error loading leaderboard:', error);
+        // Fallback to localStorage if Supabase fails
+        const savedLeaderboard = localStorage.getItem('circleLeaderboard');
+        if (savedLeaderboard) {
+          setLeaderboard(JSON.parse(savedLeaderboard));
+        }
+        return;
+      }
+
+      if (data) {
+        setLeaderboard(data);
+      }
+    } catch (error) {
+      console.error('Error connecting to database:', error);
+      // Fallback to localStorage
+      const savedLeaderboard = localStorage.getItem('circleLeaderboard');
+      if (savedLeaderboard) {
+        setLeaderboard(JSON.parse(savedLeaderboard));
+      }
+    }
+  };
 
   // Set center point when canvas is ready
   useEffect(() => {
@@ -310,8 +360,9 @@ const CircleGame: React.FC = () => {
         localStorage.setItem('circlePersonalBest', score.toString());
       }
       
-      // Check if qualifies for leaderboard
-      if (leaderboard.length < 10 || score > leaderboard[leaderboard.length - 1]?.score) {
+      // Check if qualifies for leaderboard (top 10 or better than worst score)
+      const worstScore = leaderboard.length >= 10 ? leaderboard[9].score : 0;
+      if (leaderboard.length < 10 || score > worstScore) {
         setShowCelebration(true);
         playCelebrationSound();
         setTimeout(() => {
@@ -325,23 +376,59 @@ const CircleGame: React.FC = () => {
     }
   };
 
-  // Save to leaderboard
-  const saveToLeaderboard = () => {
+  // Save to global leaderboard
+  const saveToLeaderboard = async () => {
     if (!perfectionScore || !username.trim()) return;
     
-    const newEntry: LeaderboardEntry = {
-      username: username.trim(),
-      score: perfectionScore,
-      date: new Date().toISOString()
-    };
+    setIsLoading(true);
     
-    const updatedLeaderboard = [...leaderboard, newEntry]
+    try {
+      const newEntry: LeaderboardEntry = {
+        username: username.trim(),
+        score: perfectionScore,
+        device_id: getDeviceId()
+      };
+      
+      // Try to save to Supabase first
+      if (isOnline) {
+        const { error } = await supabase
+          .from('leaderboard')
+          .insert([newEntry]);
+
+        if (error) {
+          console.error('Error saving to leaderboard:', error);
+          // Fallback to localStorage
+          saveToLocalStorage(newEntry);
+        } else {
+          // Reload leaderboard to get updated data
+          await loadLeaderboard();
+        }
+      } else {
+        // Save to localStorage when offline
+        saveToLocalStorage(newEntry);
+      }
+    } catch (error) {
+      console.error('Error saving score:', error);
+      // Fallback to localStorage
+      saveToLocalStorage({
+        username: username.trim(),
+        score: perfectionScore,
+        created_at: new Date().toISOString()
+      });
+    }
+    
+    setIsLoading(false);
+    setShowUsernameInput(false);
+  };
+
+  // Fallback to localStorage
+  const saveToLocalStorage = (entry: LeaderboardEntry) => {
+    const updatedLeaderboard = [...leaderboard, entry]
       .sort((a, b) => b.score - a.score)
       .slice(0, 10);
     
     setLeaderboard(updatedLeaderboard);
     localStorage.setItem('circleLeaderboard', JSON.stringify(updatedLeaderboard));
-    setShowUsernameInput(false);
   };
 
   // Generate tweet
@@ -360,9 +447,21 @@ const CircleGame: React.FC = () => {
             Perfect Circle
           </h1>
           <p className="text-gray-300 text-lg">Draw a perfect circle around the red dot</p>
-          {personalBest && (
-            <p className="text-sm text-cyan-400 mt-2 font-medium">Personal Best: {personalBest}%</p>
-          )}
+          <div className="flex items-center justify-center gap-4 mt-2">
+            {personalBest && (
+              <p className="text-sm text-cyan-400 font-medium">Personal Best: {personalBest}%</p>
+            )}
+            <div className="flex items-center gap-1">
+              {isOnline ? (
+                <Wifi className="text-green-400" size={16} />
+              ) : (
+                <WifiOff className="text-red-400" size={16} />
+              )}
+              <span className={`text-xs ${isOnline ? 'text-green-400' : 'text-red-400'}`}>
+                {isOnline ? 'Global' : 'Offline'}
+              </span>
+            </div>
+          </div>
         </div>
 
         {/* Game Area */}
@@ -442,7 +541,9 @@ const CircleGame: React.FC = () => {
             <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
               <div className="bg-gradient-to-br from-gray-800 to-gray-900 p-8 rounded-2xl border border-gray-600/50 shadow-2xl max-w-md w-full mx-4">
                 <h3 className="text-2xl font-bold text-white mb-2">🏆 New High Score!</h3>
-                <p className="text-gray-300 mb-6">Enter your name for the leaderboard:</p>
+                <p className="text-gray-300 mb-6">
+                  Enter your name for the {isOnline ? 'global' : 'local'} leaderboard:
+                </p>
                 <input
                   type="text"
                   value={username}
@@ -454,9 +555,10 @@ const CircleGame: React.FC = () => {
                 <div className="flex gap-3">
                   <button
                     onClick={saveToLeaderboard}
-                    className="flex-1 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white px-4 py-3 rounded-xl transition-all duration-200 font-medium"
+                    disabled={isLoading}
+                    className="flex-1 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 text-white px-4 py-3 rounded-xl transition-all duration-200 font-medium"
                   >
-                    Save
+                    {isLoading ? 'Saving...' : 'Save'}
                   </button>
                   <button
                     onClick={() => setShowUsernameInput(false)}
@@ -476,13 +578,18 @@ const CircleGame: React.FC = () => {
             <h2 className="text-3xl font-bold text-white mb-6 flex items-center gap-3">
               <Trophy className="text-yellow-400" size={32} />
               <span className="bg-gradient-to-r from-yellow-400 to-orange-400 bg-clip-text text-transparent">
-                Global Leaderboard
+                {isOnline ? 'Global' : 'Local'} Leaderboard
               </span>
+              {isOnline ? (
+                <Wifi className="text-green-400" size={20} />
+              ) : (
+                <WifiOff className="text-red-400" size={20} />
+              )}
             </h2>
             <div className="space-y-3">
               {leaderboard.map((entry, index) => (
                 <div
-                  key={index}
+                  key={entry.id || index}
                   className={`flex justify-between items-center p-4 rounded-xl transition-all duration-200 ${
                     index === 0 ? 'bg-gradient-to-r from-yellow-500/20 to-orange-500/20 border border-yellow-500/30' :
                     index === 1 ? 'bg-gradient-to-r from-gray-500/20 to-gray-600/20 border border-gray-500/30' :
